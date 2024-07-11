@@ -6,130 +6,94 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bs4 import BeautifulSoup
 
-# إعدادات البوت والمفاتيح API
-TOKEN = os.environ['TOKEN']
-URL = os.environ['URL']
-TRY2LINK_API_KEY = os.environ['TRY2LINK_API_KEY']
+# تحميل الإعدادات من متغيرات البيئة
+TOKEN = os.getenv('TOKEN')
+URL = os.getenv('URL')
+
+# إعداد البوت والتفاصيل الأخرى
 bot = telebot.TeleBot(TOKEN)
-
+app = Flask(__name__)
 url_list = {}
-
-# وظيفة لتقصير الروابط باستخدام Try2Link
-def shorten_link(original_link):
-    api_url = f"https://try2link.com/api?api={TRY2LINK_API_KEY}&url={original_link}"
-    response = requests.get(api_url).json()
-    if response["status"] == "success":
-        return response["shortenedUrl"]
-    else:
-        return original_link  # في حال فشل الحصول على الرابط المختصر، ارجع للرابط الأصلي
 
 # وظيفة البحث عن الأفلام
 def search_movies(query):
     movies_list = []
-    movies_details = {}
     website = BeautifulSoup(requests.get(f"https://mkvcinemas.cymru/?s={query.replace(' ', '+')}").text, "html.parser")
-    movies = website.find_all("a", {'class': 'ml-mask jt'})[:10]  # قصر النتائج على أول 10 أفلام
-    for movie in movies:
-        if movie:
-            movies_details["id"] = f"link{movies.index(movie)}"
-            movies_details["title"] = movie.find("span", {'class': 'mli-info'}).text
-            url_list[movies_details["id"]] = movie['href']
-        movies_list.append(movies_details)
-        movies_details = {}
+    movies = website.find_all("a", {'class': 'ml-mask jt'})
+    for index, movie in enumerate(movies[:10], start=1):
+        title = movie.find("span", {'class': 'mli-info'}).text.strip()
+        url = movie['href']
+        url_list[index] = url
+        movies_list.append(f"{index}. {title}")
     return movies_list
 
 # وظيفة جلب تفاصيل الفيلم
-def get_movie(query):
+def get_movie(index):
+    url = url_list.get(index)
+    if not url:
+        return None
     movie_details = {}
-    movie_page_link = BeautifulSoup(requests.get(f"{url_list[query]}").text, "html.parser")
-    if movie_page_link:
-        title = movie_page_link.find("div", {'class': 'mvic-desc'}).h3.text
-        movie_details["title"] = title
-        img = movie_page_link.find("div", {'class': 'mvic-thumb'})['data-bg']
-        movie_details["img"] = img
-        links = movie_page_link.find_all("a", {'rel': 'noopener', 'data-wpel-link': 'internal'})[:10]  # قصر الروابط على أول 10 روابط
-        final_links = {}
-        for i in links:
-            shortened_link = shorten_link(i['href'])
-            final_links[f"{i.text}"] = shortened_link
-        movie_details["links"] = final_links
+    movie_page = BeautifulSoup(requests.get(url).text, "html.parser")
+    title = movie_page.find("div", {'class': 'mvic-desc'}).h3.text.strip()
+    img = movie_page.find("div", {'class': 'mvic-thumb'})['data-bg']
+    movie_details["title"] = title
+    movie_details["img"] = img
+    links = movie_page.find_all("a", {'rel': 'noopener', 'data-wpel-link': 'internal'})
+    movie_details["links"] = {link.text.strip(): link['href'] for link in links[:10]}
     return movie_details
 
-# إعداد فلاسكات
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return 'Hello World!'
-
-# استقبال التحديثات من تليجرام عبر الويب هوك
+# روابط الويب هوك والتعامل مع تحديثات تليجرام
 @app.route('/{}'.format(TOKEN), methods=['POST'])
 def webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
+    update = telebot.types.Update.de_json(request.stream.read().decode('utf-8'))
     bot.process_new_updates([update])
-    return 'ok'
+    return 'ok', 200
 
-# إعداد الويب هوك
-@app.route('/setwebhook', methods=['GET', 'POST'])
+# إزالة الويب هوك
+@app.route('/remove_webhook', methods=['GET'])
+def remove_webhook():
+    bot.remove_webhook()
+    return 'Webhook removed', 200
+
+# تعيين الويب هوك
+@app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     s = bot.set_webhook(f'{URL}/{TOKEN}')
     if s:
-        return "webhook setup ok"
+        return "Webhook setup ok"
     else:
-        return "webhook setup failed"
+        return "Webhook setup failed"
 
 # التعامل مع أمر /start
 @bot.message_handler(commands=['start'])
-def welcome(message):
-    bot.send_message(
-        message.chat.id, 
-        f"Hello {message.from_user.first_name}, Welcome to aj Movies.\n"
-        f"🔥 Download Your Favourite Movies For 💯 Free And 🍿 Enjoy it.\n"
-        f"👇 Enter Movie Name 👇"
-    )
+def handle_start(message):
+    bot.send_message(message.chat.id, "Welcome! Enter the movie name to search.")
 
 # التعامل مع الرسائل النصية (البحث عن الأفلام)
 @bot.message_handler(func=lambda message: True)
-def find_movie(message):
-    search_results = bot.send_message(message.chat.id, "Processing...")
-    query = message.text
-    movies_list = search_movies(query)
-    if movies_list:
-        keyboards = InlineKeyboardMarkup()
-        for movie in movies_list:
-            keyboard = InlineKeyboardButton(movie["title"], callback_data=movie["id"])
-            keyboards.add(keyboard)
-        bot.edit_message_text('Search Results...', chat_id=message.chat.id, message_id=search_results.message_id, reply_markup=keyboards)
+def handle_message(message):
+    query = message.text.strip()
+    if query:
+        movies_list = search_movies(query)
+        if movies_list:
+            bot.send_message(message.chat.id, "Search Results:\n" + "\n".join(movies_list))
+        else:
+            bot.send_message(message.chat.id, "No movies found for your query.")
     else:
-        bot.edit_message_text('Sorry 🙏, No Result Found!\nCheck If You Have Misspelled The Movie Name.', chat_id=message.chat.id, message_id=search_results.message_id)
+        bot.send_message(message.chat.id, "Please enter a movie name to search.")
 
 # التعامل مع اختيار الفيلم من النتائج
 @bot.callback_query_handler(func=lambda call: True)
-def movie_result(call):
-    s = get_movie(call.data)
-    response = requests.get(s["img"])
-    img = BytesIO(response.content)
-    bot.send_photo(call.message.chat.id, photo=img, caption=f"🎥 {s['title']}")
-    link = ""
-    links = s["links"]
-    for i in links:
-        link += "🎬" + i + "\n" + links[i] + "\n\n"
-    caption = f"⚡ Fast Download Links :-\n\n{link}"
-    if len(caption) > 4095:
-        for x in range(0, len(caption), 4095):
-            bot.send_message(call.message.chat.id, text=caption[x:x+4095])
+def handle_callback(call):
+    index = int(call.data)
+    movie_details = get_movie(index)
+    if movie_details:
+        bot.send_photo(call.message.chat.id, photo=movie_details['img'], caption=movie_details['title'])
+        links_text = "\n".join([f"{key}: {value}" for key, value in movie_details['links'].items()])
+        bot.send_message(call.message.chat.id, f"Download Links:\n{links_text}")
     else:
-        bot.send_message(call.message.chat.id, text=caption)
+        bot.send_message(call.message.chat.id, "Movie details not found.")
 
-# وظيفة إرسال اقتراحات الأفلام
-@bot.message_handler(commands=['suggest'])
-def suggest_movies(message):
-    suggestions = ["Inception", "Interstellar", "The Dark Knight", "Titanic", "Avatar"]
-    bot.send_message(message.chat.id, f"Suggested Movies:\n" + "\n".join(suggestions))
-
-# بدء تشغيل التطبيق
+# تشغيل التطبيق
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{URL}/{TOKEN}")
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv('PORT', 5000)))
